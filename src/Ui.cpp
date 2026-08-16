@@ -1,0 +1,940 @@
+#include "Ui.h"
+
+#include <Shellapi.h>
+#include <gdiplus/gdiplus.h>
+
+#include <algorithm>
+#include <cwchar>
+#include <sstream>
+#include <vector>
+
+namespace {
+const UINT TrayMessage = WM_APP + 1;
+const UINT TrayIconId = 1;
+const UINT MenuSettings = 1001;
+const UINT MenuOpenLibrary = 1002;
+const UINT MenuExit = 1003;
+
+const int SettingsWidth = 600;
+const int SettingsHeight = 600;
+const int IdThreshold = 2001;
+const int IdMaxItems = 2002;
+const int IdAskConfirm = 2003;
+const int IdAutoDetect = 2004;
+const int IdAllowlist = 2005;
+const int IdSave = 2006;
+const int IdCancel = 2007;
+const int IdClearCache = 2008;
+const int IdMaxFileSize = 2009;
+const int IdCacheMaxAgeDays = 2010;
+
+const int PickerWidth = 760;
+const int PickerHeight = 520;
+const int IdPickerList = 3001;
+const int IdPickerChoose = 3002;
+const int IdPickerCancel = 3003;
+const int IdPickerFileName = 3004;
+const int IdPickerSendAsFile = 3005;
+const int IdPickerSearch = 3006;
+
+const int ConversionWidth = 500;
+const int ConversionHeight = 230;
+const int IdConversionName = 4001;
+const int IdConversionConvert = 4002;
+const int IdConversionRaw = 4003;
+const int IdConversionCancel = 4004;
+
+WNDPROC originalAllowlistProc = nullptr;
+
+struct SettingsWindowState {
+    Ui* ui;
+    HWND thresholdEdit;
+    HWND maxItemsEdit;
+    HWND maxFileSizeEdit;
+    HWND cacheMaxAgeDaysEdit;
+    HWND askConfirmCheck;
+    HWND autoDetectCheck;
+    HWND allowlistEdit;
+    bool done;
+    bool saved;
+
+    SettingsWindowState()
+        : ui(nullptr), thresholdEdit(nullptr), maxItemsEdit(nullptr), maxFileSizeEdit(nullptr), cacheMaxAgeDaysEdit(nullptr),
+          askConfirmCheck(nullptr), autoDetectCheck(nullptr), allowlistEdit(nullptr), done(false), saved(false) {}
+};
+
+struct PickerWindowState {
+    ClipboardLibrary* library;
+    HWND searchEdit;
+    HWND listBox;
+    HWND fileNameEdit;
+    HWND sendAsFileCheck;
+    std::vector<size_t> filteredIndices;
+    int selectedIndex;
+    bool defaultSendTextAsFile;
+    bool sendTextAsFile;
+    bool done;
+    std::wstring selectedFileName;
+
+    PickerWindowState()
+        : library(nullptr), searchEdit(nullptr), listBox(nullptr), fileNameEdit(nullptr), sendAsFileCheck(nullptr),
+          selectedIndex(-1), defaultSendTextAsFile(true), sendTextAsFile(true), done(false) {}
+};
+
+struct ConversionWindowState {
+    size_t characterCount;
+    std::wstring defaultFileName;
+    HWND fileNameEdit;
+    TextConversionChoice choice;
+    bool done;
+
+    ConversionWindowState() : characterCount(0), fileNameEdit(nullptr), done(false) {}
+};
+
+std::wstring typeLabel(const ClipboardItem& item) {
+    if (item.type == ClipboardItem::Image) {
+        return L"Ảnh";
+    }
+    if (item.type == ClipboardItem::Files) {
+        return L"File";
+    }
+    return L"Text";
+}
+
+std::wstring defaultPickerFileName(const ClipboardItem& item) {
+    if (item.type == ClipboardItem::Text) {
+        std::wstring value = item.title;
+        const size_t colon = value.find(L": ");
+        if (colon != std::wstring::npos && colon + 2 < value.size()) {
+            value = value.substr(colon + 2);
+        }
+        value = safeFilePart(value);
+        if (value.empty() || value == L"clipboard") {
+            value = L"clipboard_text.txt";
+        }
+        if (extensionFromPath(value).empty()) {
+            value += L".txt";
+        }
+        return value;
+    }
+
+    if (!item.files.empty()) {
+        return safeFilePart(fileNameFromPath(item.files.front()));
+    }
+    return item.type == ClipboardItem::Image ? L"image" : L"file";
+}
+
+std::wstring itemLabel(const ClipboardItem& item, size_t index) {
+    std::wstringstream stream;
+    stream << (index + 1) << L". [" << typeLabel(item) << L"] " << item.title;
+    if ((item.type == ClipboardItem::Files || item.type == ClipboardItem::Image) && !item.files.empty()) {
+        for (size_t fileIndex = 0; fileIndex < item.files.size(); ++fileIndex) {
+            if (!fileExists(item.files[fileIndex])) {
+                stream << L" (cache missing)";
+                break;
+            }
+        }
+    }
+    return stream.str();
+}
+
+std::wstring joinAllowlist(const std::vector<std::wstring>& values) {
+    std::wstring result;
+    for (size_t index = 0; index < values.size(); ++index) {
+        if (index > 0) {
+            result += L"\r\n";
+        }
+        result += values[index];
+    }
+    return result;
+}
+
+std::vector<std::wstring> parseAllowlist(std::wstring value) {
+    for (size_t index = 0; index < value.size(); ++index) {
+        if (value[index] == L'\r' || value[index] == L'\n' || value[index] == L';') {
+            value[index] = L',';
+        }
+    }
+
+    std::vector<std::wstring> result;
+    std::wstringstream stream(value);
+    std::wstring part;
+    while (std::getline(stream, part, L',')) {
+        part = toLower(trim(part));
+        if (!part.empty()) {
+            result.push_back(part);
+        }
+    }
+    return result;
+}
+
+std::wstring windowText(HWND window) {
+    const int length = GetWindowTextLengthW(window);
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(window, &text[0], length + 1);
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+void setDefaultFont(HWND window) {
+    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    SendMessageW(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+HWND createControl(HWND parent, const wchar_t* className, const wchar_t* text, DWORD style, DWORD exStyle, int x, int y, int width, int height, int id) {
+    HWND control = CreateWindowExW(exStyle, className, text, WS_CHILD | WS_VISIBLE | style, x, y, width, height, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+    setDefaultFont(control);
+    return control;
+}
+
+void centerWindow(HWND window, HWND owner) {
+    RECT windowRect;
+    GetWindowRect(window, &windowRect);
+    RECT ownerRect;
+    if (owner != nullptr) {
+        GetWindowRect(owner, &ownerRect);
+    } else {
+        ownerRect.left = 0;
+        ownerRect.top = 0;
+        ownerRect.right = GetSystemMetrics(SM_CXSCREEN);
+        ownerRect.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+
+    const int width = windowRect.right - windowRect.left;
+    const int height = windowRect.bottom - windowRect.top;
+    const int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
+    const int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+    SetWindowPos(window, nullptr, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+}
+
+LRESULT CALLBACK allowlistEditProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_KEYDOWN && wParam == VK_RETURN) {
+        SendMessageW(window, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"\r\n"));
+        return 0;
+    }
+    return CallWindowProcW(originalAllowlistProc, window, message, wParam, lParam);
+}
+
+void clearCacheFromSettings(HWND window, SettingsWindowState* state) {
+    if (MessageBoxW(window, L"Xóa toàn bộ file cache đã tạo? Text thô trong clipboard library vẫn được giữ.", L"Xóa cache", MB_YESNO | MB_ICONWARNING | MB_TOPMOST) != IDYES) {
+        return;
+    }
+    clearDirectoryContents(state->ui->appState().cacheDir());
+    ensureDirectory(state->ui->appState().cacheDir());
+    state->ui->library().removeCachedItems();
+    MessageBoxW(window, L"Đã xóa cache file/ảnh và giữ lại lịch sử text thô.", L"ClipboardTxtApp", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+}
+
+void saveSettings(HWND window, SettingsWindowState* state) {
+    const int threshold = _wtoi(trim(windowText(state->thresholdEdit)).c_str());
+    if (threshold <= 0) {
+        MessageBoxW(window, L"Ngưỡng ký tự phải là số lớn hơn 0.", L"ClipboardTxtApp", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    int maxItems = _wtoi(trim(windowText(state->maxItemsEdit)).c_str());
+    if (maxItems < 1 || maxItems > 500) {
+        MessageBoxW(window, L"Số slot clipboard tối đa phải nằm trong khoảng 1–500.", L"ClipboardTxtApp", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    const int maxFileSizeMB = _wtoi(trim(windowText(state->maxFileSizeEdit)).c_str());
+    if (maxFileSizeMB < 1 || maxFileSizeMB > 10240) {
+        MessageBoxW(window, L"Dung lượng file cache tối đa phải nằm trong khoảng 1–10240 MB.", L"ClipboardTxtApp", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    const std::wstring cacheMaxAgeText = trim(windowText(state->cacheMaxAgeDaysEdit));
+    const int cacheMaxAgeDays = _wtoi(cacheMaxAgeText.c_str());
+    if (cacheMaxAgeText.empty() || cacheMaxAgeDays < 0 || cacheMaxAgeDays > 36500) {
+        MessageBoxW(window, L"Số ngày giữ cache phải nằm trong khoảng 0–36500. Nhập 0 để không tự xóa.", L"ClipboardTxtApp", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    std::vector<std::wstring> allowed = parseAllowlist(windowText(state->allowlistEdit));
+    if (allowed.empty()) {
+        MessageBoxW(window, L"Allowlist phải có ít nhất một process, ví dụ chrome.exe.", L"ClipboardTxtApp", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    AppConfig& config = state->ui->appState().config();
+    config.textThreshold = threshold;
+    config.maxItems = maxItems;
+    config.maxFileSizeMB = maxFileSizeMB;
+    config.cacheMaxAgeDays = cacheMaxAgeDays;
+    config.askBeforeConverting = SendMessageW(state->askConfirmCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.enableFileDialogAutoDetect = SendMessageW(state->autoDetectCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    config.allowedProcesses = allowed;
+    state->ui->appState().save();
+    state->ui->library().trimToLimit();
+    state->ui->library().save();
+
+    state->saved = true;
+    state->done = true;
+    DestroyWindow(window);
+}
+
+LRESULT CALLBACK settingsProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    SettingsWindowState* state = reinterpret_cast<SettingsWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_NCCREATE: {
+        CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE: {
+        state = reinterpret_cast<SettingsWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        const AppConfig& config = state->ui->appState().config();
+
+        createControl(window, L"STATIC", L"Cài đặt chuyển đổi", 0, 0, 20, 16, 220, 22, 0);
+        createControl(window, L"STATIC", L"Ngưỡng ký tự:", 0, 0, 36, 50, 150, 22, 0);
+        state->thresholdEdit = createControl(window, L"EDIT", numberToWString(static_cast<size_t>(config.textThreshold)).c_str(), ES_NUMBER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 190, 47, 120, 24, IdThreshold);
+
+        createControl(window, L"STATIC", L"Số slot clipboard:", 0, 0, 330, 50, 150, 22, 0);
+        state->maxItemsEdit = createControl(window, L"EDIT", numberToWString(static_cast<size_t>(config.maxItems)).c_str(), ES_NUMBER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 460, 47, 90, 24, IdMaxItems);
+
+        createControl(window, L"STATIC", L"File cache tối đa (MB):", 0, 0, 36, 82, 150, 22, 0);
+        state->maxFileSizeEdit = createControl(window, L"EDIT", numberToWString(static_cast<size_t>(config.maxFileSizeMB)).c_str(), ES_NUMBER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 190, 79, 120, 24, IdMaxFileSize);
+        createControl(window, L"STATIC", L"Áp dụng cho mỗi file/ảnh mới lưu.", 0, 0, 330, 82, 220, 22, 0);
+
+        state->askConfirmCheck = createControl(window, L"BUTTON", L"Luôn hỏi trước khi chuyển văn bản dài thành file TXT", BS_AUTOCHECKBOX, 0, 36, 112, 500, 24, IdAskConfirm);
+        SendMessageW(state->askConfirmCheck, BM_SETCHECK, config.askBeforeConverting ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        state->autoDetectCheck = createControl(window, L"BUTTON", L"Tự phát hiện hộp Choose file trong browser/app được cho phép", BS_AUTOCHECKBOX, 0, 36, 140, 510, 24, IdAutoDetect);
+        SendMessageW(state->autoDetectCheck, BM_SETCHECK, config.enableFileDialogAutoDetect ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        createControl(window, L"STATIC", L"Ứng dụng được phép", 0, 0, 20, 182, 220, 22, 0);
+        createControl(window, L"STATIC", L"Nhập mỗi process một dòng, ví dụ chrome.exe hoặc discord.exe", 0, 0, 36, 208, 500, 22, 0);
+        state->allowlistEdit = createControl(window, L"EDIT", joinAllowlist(config.allowedProcesses).c_str(), ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL, WS_EX_CLIENTEDGE, 36, 233, 514, 145, IdAllowlist);
+        originalAllowlistProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(state->allowlistEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(allowlistEditProc)));
+
+        createControl(window, L"STATIC", L"Cache", 0, 0, 20, 396, 220, 22, 0);
+        createControl(window, L"STATIC", L"Tự xóa file cache cũ hơn:", 0, 0, 36, 422, 170, 22, 0);
+        state->cacheMaxAgeDaysEdit = createControl(window, L"EDIT", numberToWString(static_cast<size_t>(config.cacheMaxAgeDays)).c_str(), ES_NUMBER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 205, 419, 70, 24, IdCacheMaxAgeDays);
+        createControl(window, L"STATIC", L"ngày (0 = không tự xóa)", 0, 0, 285, 422, 180, 22, 0);
+        createControl(window, L"STATIC", L"Áp dụng khi app khởi động.", 0, 0, 36, 452, 260, 22, 0);
+        createControl(window, L"BUTTON", L"Xóa toàn bộ cache", 0, 0, 410, 447, 140, 30, IdClearCache);
+
+        createControl(window, L"STATIC", L"Hotkey: Ctrl+Alt+V để chọn clipboard cho Choose file hoặc input chat", 0, 0, 36, 490, 500, 22, 0);
+        createControl(window, L"BUTTON", L"Lưu", BS_DEFPUSHBUTTON, 0, 370, 520, 86, 30, IdSave);
+        createControl(window, L"BUTTON", L"Hủy", 0, 0, 466, 520, 86, 30, IdCancel);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IdSave && state != nullptr) {
+            saveSettings(window, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdClearCache && state != nullptr) {
+            clearCacheFromSettings(window, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdCancel && state != nullptr) {
+            state->done = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        return 0;
+    case WM_CLOSE:
+        if (state != nullptr) {
+            state->done = true;
+        }
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr) {
+            state->done = true;
+        }
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+
+RECT previewRect() {
+    RECT rect;
+    rect.left = 345;
+    rect.top = 55;
+    rect.right = 730;
+    rect.bottom = 345;
+    return rect;
+}
+
+void drawTextBlock(HDC dc, const std::wstring& text, RECT rect, UINT format) {
+    DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &rect, format);
+}
+
+void drawImagePreview(HDC dc, const std::wstring& path, const RECT& rect) {
+    Gdiplus::Graphics graphics(dc);
+    Gdiplus::Image image(path.c_str());
+    if (image.GetLastStatus() != Gdiplus::Ok || image.GetWidth() == 0 || image.GetHeight() == 0) {
+        RECT textRect = rect;
+        DrawTextW(dc, L"Không thể preview ảnh này. File vẫn có thể được chọn để upload.", -1, &textRect, DT_WORDBREAK | DT_CENTER | DT_VCENTER);
+        return;
+    }
+
+    const double maxWidth = static_cast<double>(rect.right - rect.left - 24);
+    const double maxHeight = static_cast<double>(rect.bottom - rect.top - 24);
+    const double scaleX = maxWidth / static_cast<double>(image.GetWidth());
+    const double scaleY = maxHeight / static_cast<double>(image.GetHeight());
+    const double scale = std::min(scaleX, scaleY);
+    const int width = static_cast<int>(image.GetWidth() * scale);
+    const int height = static_cast<int>(image.GetHeight() * scale);
+    const int x = rect.left + ((rect.right - rect.left) - width) / 2;
+    const int y = rect.top + ((rect.bottom - rect.top) - height) / 2;
+    graphics.DrawImage(&image, x, y, width, height);
+}
+
+void updatePickerFileNameEdit(PickerWindowState* state) {
+    if (state == nullptr || state->fileNameEdit == nullptr || state->library == nullptr) {
+        return;
+    }
+
+    const std::vector<ClipboardItem>& items = state->library->items();
+    if (state->selectedIndex >= 0 && static_cast<size_t>(state->selectedIndex) < items.size()) {
+        const ClipboardItem& item = items[static_cast<size_t>(state->selectedIndex)];
+        EnableWindow(state->fileNameEdit, TRUE);
+        SetWindowTextW(state->fileNameEdit, defaultPickerFileName(item).c_str());
+        if (state->sendAsFileCheck != nullptr) {
+            EnableWindow(state->sendAsFileCheck, item.type == ClipboardItem::Text);
+            SendMessageW(state->sendAsFileCheck, BM_SETCHECK, state->defaultSendTextAsFile ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    } else {
+        SetWindowTextW(state->fileNameEdit, L"");
+        EnableWindow(state->fileNameEdit, FALSE);
+        if (state->sendAsFileCheck != nullptr) {
+            EnableWindow(state->sendAsFileCheck, FALSE);
+            SendMessageW(state->sendAsFileCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        }
+    }
+}
+
+bool pickerItemMatches(const ClipboardItem& item, const std::wstring& query) {
+    if (query.empty()) {
+        return true;
+    }
+
+    if (toLower(item.title).find(query) != std::wstring::npos ||
+        toLower(item.text).find(query) != std::wstring::npos ||
+        toLower(item.createdAt).find(query) != std::wstring::npos ||
+        toLower(typeLabel(item)).find(query) != std::wstring::npos) {
+        return true;
+    }
+
+    for (size_t index = 0; index < item.files.size(); ++index) {
+        if (toLower(item.files[index]).find(query) != std::wstring::npos) {
+            return true;
+        }
+    }
+    for (size_t index = 0; index < item.originalFiles.size(); ++index) {
+        if (toLower(item.originalFiles[index]).find(query) != std::wstring::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void updatePickerSelectionFromList(PickerWindowState* state) {
+    if (state == nullptr || state->listBox == nullptr) {
+        return;
+    }
+
+    const int listIndex = static_cast<int>(SendMessageW(state->listBox, LB_GETCURSEL, 0, 0));
+    if (listIndex >= 0 && static_cast<size_t>(listIndex) < state->filteredIndices.size()) {
+        state->selectedIndex = static_cast<int>(state->filteredIndices[static_cast<size_t>(listIndex)]);
+    } else {
+        state->selectedIndex = -1;
+    }
+}
+
+void refreshPickerList(HWND window, PickerWindowState* state) {
+    if (state == nullptr || state->library == nullptr || state->listBox == nullptr) {
+        return;
+    }
+
+    const int previousSelectedIndex = state->selectedIndex;
+    const std::wstring query = state->searchEdit == nullptr ? L"" : toLower(trim(windowText(state->searchEdit)));
+    const std::vector<ClipboardItem>& items = state->library->items();
+
+    SendMessageW(state->listBox, LB_RESETCONTENT, 0, 0);
+    state->filteredIndices.clear();
+
+    int selectedListIndex = -1;
+    for (size_t index = 0; index < items.size(); ++index) {
+        if (!pickerItemMatches(items[index], query)) {
+            continue;
+        }
+
+        const int listIndex = static_cast<int>(state->filteredIndices.size());
+        state->filteredIndices.push_back(index);
+        SendMessageW(state->listBox, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(itemLabel(items[index], index).c_str()));
+        if (static_cast<int>(index) == previousSelectedIndex) {
+            selectedListIndex = listIndex;
+        }
+    }
+
+    if (selectedListIndex < 0 && !state->filteredIndices.empty()) {
+        selectedListIndex = 0;
+    }
+    if (selectedListIndex >= 0) {
+        SendMessageW(state->listBox, LB_SETCURSEL, selectedListIndex, 0);
+    }
+    updatePickerSelectionFromList(state);
+    updatePickerFileNameEdit(state);
+
+    RECT rect = previewRect();
+    InvalidateRect(window, &rect, TRUE);
+}
+
+void drawPickerPreview(HWND window, HDC dc, PickerWindowState* state) {
+    RECT rect = previewRect();
+    HBRUSH background = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(dc, &rect, background);
+    DeleteObject(background);
+    FrameRect(dc, &rect, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+
+    SetBkMode(dc, TRANSPARENT);
+    HFONT titleFont = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dc, titleFont));
+
+    RECT titleRect = rect;
+    titleRect.left += 14;
+    titleRect.top += 12;
+    titleRect.right -= 14;
+    titleRect.bottom = titleRect.top + 34;
+
+    const std::vector<ClipboardItem>& items = state->library->items();
+    if (state->selectedIndex < 0 || static_cast<size_t>(state->selectedIndex) >= items.size()) {
+        DrawTextW(dc, L"Chọn một item ở danh sách bên trái", -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, oldFont);
+        DeleteObject(titleFont);
+        return;
+    }
+
+    const ClipboardItem& item = items[static_cast<size_t>(state->selectedIndex)];
+    DrawTextW(dc, item.title.c_str(), -1, &titleRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, oldFont);
+    DeleteObject(titleFont);
+
+    RECT bodyRect = rect;
+    bodyRect.left += 14;
+    bodyRect.top += 54;
+    bodyRect.right -= 14;
+    bodyRect.bottom -= 14;
+
+    if (item.type == ClipboardItem::Image) {
+        drawImagePreview(dc, item.previewPath.empty() ? item.files.front() : item.previewPath, bodyRect);
+        return;
+    }
+
+    std::wstringstream body;
+    if (item.type == ClipboardItem::Files) {
+        body << L"Loại: File cache\n\n";
+        for (size_t index = 0; index < item.files.size(); ++index) {
+            body << L"Cache: " << item.files[index] << L"\n";
+            if (index < item.originalFiles.size()) {
+                body << L"Gốc:   " << item.originalFiles[index] << L"\n";
+            }
+            body << L"\n";
+        }
+    } else {
+        body << L"Loại: Text thô\n"
+             << L"Khi chọn, app sẽ tạo file .txt rồi đưa vào Choose file.\n\n"
+             << item.text.substr(0, 1200);
+    }
+    drawTextBlock(dc, body.str(), bodyRect, DT_WORDBREAK | DT_LEFT | DT_TOP);
+}
+
+void acceptPickerSelection(HWND window, PickerWindowState* state) {
+    if (state == nullptr) {
+        return;
+    }
+    updatePickerSelectionFromList(state);
+    const std::vector<ClipboardItem>& items = state->library->items();
+    if (state->selectedIndex >= 0 && static_cast<size_t>(state->selectedIndex) < items.size()) {
+        state->selectedFileName = safeFilePart(windowText(state->fileNameEdit));
+        if (state->selectedFileName.empty()) {
+            state->selectedFileName = defaultPickerFileName(items[static_cast<size_t>(state->selectedIndex)]);
+        }
+        state->sendTextAsFile = items[static_cast<size_t>(state->selectedIndex)].type != ClipboardItem::Text || SendMessageW(state->sendAsFileCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+    state->done = true;
+    DestroyWindow(window);
+}
+
+LRESULT CALLBACK conversionProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    ConversionWindowState* state = reinterpret_cast<ConversionWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_NCCREATE: {
+        CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE: {
+        state = reinterpret_cast<ConversionWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        std::wstringstream messageText;
+        messageText << L"Văn bản dài " << state->characterCount << L" ký tự. Target hiện tại có thể nhận file, bạn muốn gửi dạng .txt không?";
+        createControl(window, L"STATIC", messageText.str().c_str(), 0, 0, 18, 18, 450, 42, 0);
+        createControl(window, L"STATIC", L"Tên file TXT:", 0, 0, 18, 78, 110, 22, 0);
+        state->fileNameEdit = createControl(window, L"EDIT", state->defaultFileName.c_str(), ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 130, 75, 330, 24, IdConversionName);
+        createControl(window, L"BUTTON", L"Chuyển thành TXT", BS_DEFPUSHBUTTON, 0, 70, 138, 130, 30, IdConversionConvert);
+        createControl(window, L"BUTTON", L"Dán text gốc", 0, 0, 210, 138, 110, 30, IdConversionRaw);
+        createControl(window, L"BUTTON", L"Hủy", 0, 0, 330, 138, 80, 30, IdConversionCancel);
+        SetFocus(state->fileNameEdit);
+        SendMessageW(state->fileNameEdit, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == IdConversionConvert) {
+            state->choice.handled = true;
+            state->choice.convertToFile = true;
+            state->choice.fileNamePrefix = safeFilePart(windowText(state->fileNameEdit));
+            if (state->choice.fileNamePrefix.empty()) {
+                state->choice.fileNamePrefix = L"pasted_text";
+            }
+            state->done = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == IdConversionRaw) {
+            state->choice.handled = true;
+            state->choice.convertToFile = false;
+            state->done = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == IdConversionCancel) {
+            state->choice.handled = false;
+            state->done = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        return 0;
+    case WM_CLOSE:
+        if (state != nullptr) {
+            state->done = true;
+        }
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr) {
+            state->done = true;
+        }
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+
+LRESULT CALLBACK pickerProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    PickerWindowState* state = reinterpret_cast<PickerWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+    switch (message) {
+    case WM_NCCREATE: {
+        CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE: {
+        state = reinterpret_cast<PickerWindowState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        createControl(window, L"STATIC", L"Clipboard library", 0, 0, 16, 15, 220, 22, 0);
+        createControl(window, L"STATIC", L"Preview", 0, 0, 345, 15, 220, 22, 0);
+        createControl(window, L"STATIC", L"Tìm kiếm:", 0, 0, 16, 44, 66, 22, 0);
+        state->searchEdit = createControl(window, L"EDIT", L"", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 82, 41, 244, 24, IdPickerSearch);
+        state->listBox = createControl(window, L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER, WS_EX_CLIENTEDGE, 16, 73, 310, 302, IdPickerList);
+        createControl(window, L"BUTTON", L"Chọn", BS_DEFPUSHBUTTON, 0, 550, 442, 86, 30, IdPickerChoose);
+        createControl(window, L"BUTTON", L"Hủy", 0, 0, 645, 442, 86, 30, IdPickerCancel);
+        createControl(window, L"STATIC", L"Tên file:", 0, 0, 345, 365, 120, 22, 0);
+        state->fileNameEdit = createControl(window, L"EDIT", L"clipboard_text", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, 455, 362, 275, 24, IdPickerFileName);
+        state->sendAsFileCheck = createControl(window, L"BUTTON", L"Với text: gửi dạng TXT (bỏ tick để dán text thô khi nhập liệu)", BS_AUTOCHECKBOX, 0, 345, 395, 385, 24, IdPickerSendAsFile);
+        refreshPickerList(window, state);
+        SetFocus(state->searchEdit);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IdPickerSearch && HIWORD(wParam) == EN_CHANGE && state != nullptr) {
+            refreshPickerList(window, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdPickerList && HIWORD(wParam) == LBN_SELCHANGE && state != nullptr) {
+            updatePickerSelectionFromList(state);
+            updatePickerFileNameEdit(state);
+            RECT rect = previewRect();
+            InvalidateRect(window, &rect, TRUE);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdPickerList && HIWORD(wParam) == LBN_DBLCLK && state != nullptr) {
+            acceptPickerSelection(window, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdPickerChoose && state != nullptr) {
+            acceptPickerSelection(window, state);
+            return 0;
+        }
+        if (LOWORD(wParam) == IdPickerCancel && state != nullptr) {
+            state->selectedIndex = -1;
+            state->done = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(window, &paint);
+        if (state != nullptr) {
+            drawPickerPreview(window, dc, state);
+        }
+        EndPaint(window, &paint);
+        return 0;
+    }
+    case WM_CLOSE:
+        if (state != nullptr) {
+            state->selectedIndex = -1;
+            state->done = true;
+        }
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        if (state != nullptr) {
+            state->done = true;
+        }
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+} // namespace
+
+Ui::Ui(HINSTANCE instance, HWND owner, AppState& state, ClipboardLibrary& library)
+    : instance_(instance), owner_(owner), state_(state), library_(library) {}
+
+bool Ui::addTrayIcon() {
+    NOTIFYICONDATAW data;
+    ZeroMemory(&data, sizeof(data));
+    data.cbSize = sizeof(data);
+    data.hWnd = owner_;
+    data.uID = TrayIconId;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uCallbackMessage = TrayMessage;
+    data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wcsncpy(data.szTip, L"ClipboardTxtApp", sizeof(data.szTip) / sizeof(wchar_t) - 1);
+    return Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+}
+
+void Ui::removeTrayIcon() {
+    NOTIFYICONDATAW data;
+    ZeroMemory(&data, sizeof(data));
+    data.cbSize = sizeof(data);
+    data.hWnd = owner_;
+    data.uID = TrayIconId;
+    Shell_NotifyIconW(NIM_DELETE, &data);
+}
+
+void Ui::showTrayMenu() {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, MenuSettings, L"Cài đặt");
+    AppendMenuW(menu, MF_STRING, MenuOpenLibrary, L"Chọn từ clipboard library");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, MenuExit, L"Thoát");
+
+    POINT point;
+    GetCursorPos(&point);
+    SetForegroundWindow(owner_);
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, 0, owner_, nullptr);
+    DestroyMenu(menu);
+
+    if (command == MenuSettings) {
+        showSettings();
+    } else if (command == MenuOpenLibrary) {
+        chooseClipboardItem();
+    } else if (command == MenuExit) {
+        PostMessageW(owner_, WM_CLOSE, 0, 0);
+    }
+}
+
+void Ui::showSettings() {
+    const wchar_t* className = L"ClipboardTxtAppSettingsWindow";
+    WNDCLASSW windowClass;
+    ZeroMemory(&windowClass, sizeof(windowClass));
+    windowClass.lpfnWndProc = settingsProc;
+    windowClass.hInstance = instance_;
+    windowClass.lpszClassName = className;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    RegisterClassW(&windowClass);
+
+    SettingsWindowState state;
+    state.ui = this;
+
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, className, L"ClipboardTxtApp - Cài đặt", WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, SettingsWidth, SettingsHeight, owner_, nullptr, instance_, &state);
+    if (window == nullptr) {
+        MessageBoxW(owner_, L"Không thể mở cửa sổ cài đặt.", L"ClipboardTxtApp", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    centerWindow(window, nullptr);
+    EnableWindow(owner_, FALSE);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+
+    MSG message;
+    while (!state.done && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (GetFocus() == state.allowlistEdit && message.message == WM_KEYDOWN && message.wParam == VK_RETURN) {
+            DispatchMessageW(&message);
+            continue;
+        }
+        if (!IsDialogMessageW(window, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(owner_, TRUE);
+    SetForegroundWindow(owner_);
+
+    if (state.saved) {
+        MessageBoxW(owner_, L"Đã lưu cài đặt.", L"ClipboardTxtApp", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+    }
+}
+
+TextConversionChoice Ui::askTextConversion(size_t characterCount, const std::wstring& defaultFileName) {
+    const wchar_t* className = L"ClipboardTxtAppConversionWindow";
+    WNDCLASSW windowClass;
+    ZeroMemory(&windowClass, sizeof(windowClass));
+    windowClass.lpfnWndProc = conversionProc;
+    windowClass.hInstance = instance_;
+    windowClass.lpszClassName = className;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    RegisterClassW(&windowClass);
+
+    ConversionWindowState state;
+    state.characterCount = characterCount;
+    state.defaultFileName = safeFilePart(defaultFileName.empty() ? L"pasted_text" : defaultFileName);
+
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, className, L"Chuyển văn bản dài thành TXT?", WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, ConversionWidth, ConversionHeight, owner_, nullptr, instance_, &state);
+    if (window == nullptr) {
+        return TextConversionChoice();
+    }
+
+    centerWindow(window, nullptr);
+    EnableWindow(owner_, FALSE);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+
+    MSG message;
+    while (!state.done && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(window, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    EnableWindow(owner_, TRUE);
+    SetForegroundWindow(owner_);
+    return state.choice;
+}
+
+
+void Ui::showInfo(const std::wstring& message) {
+    MessageBoxW(owner_, message.c_str(), L"ClipboardTxtApp", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+}
+
+ClipboardPickResult Ui::chooseClipboardItem(bool sendTextAsFileByDefault) {
+    ClipboardPickResult result;
+    if (library_.items().empty()) {
+        MessageBoxW(owner_, L"Chưa có mục clipboard nào được lưu.", L"ClipboardTxtApp", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+        return result;
+    }
+
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken = 0;
+    const bool gdiplusStarted = Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) == Gdiplus::Ok;
+
+    const wchar_t* className = L"ClipboardTxtAppPickerWindow";
+    WNDCLASSW windowClass;
+    ZeroMemory(&windowClass, sizeof(windowClass));
+    windowClass.lpfnWndProc = pickerProc;
+    windowClass.hInstance = instance_;
+    windowClass.lpszClassName = className;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    RegisterClassW(&windowClass);
+
+    PickerWindowState state;
+    state.library = &library_;
+    state.defaultSendTextAsFile = sendTextAsFileByDefault;
+    state.sendTextAsFile = sendTextAsFileByDefault;
+
+    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST, className, L"Chọn item clipboard", WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, PickerWidth, PickerHeight, owner_, nullptr, instance_, &state);
+    if (window == nullptr) {
+        if (gdiplusStarted) {
+            Gdiplus::GdiplusShutdown(gdiplusToken);
+        }
+        return result;
+    }
+
+    centerWindow(window, nullptr);
+    EnableWindow(owner_, FALSE);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    BringWindowToTop(window);
+    SetForegroundWindow(window);
+    SetActiveWindow(window);
+    if (state.searchEdit != nullptr) {
+        SetFocus(state.searchEdit);
+    }
+
+    MSG message;
+    while (!state.done && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE &&
+            (message.hwnd == window || IsChild(window, message.hwnd))) {
+            state.selectedIndex = -1;
+            state.done = true;
+            DestroyWindow(window);
+            continue;
+        }
+        if (message.hwnd == state.searchEdit && message.message == WM_KEYDOWN) {
+            if (message.wParam == VK_UP || message.wParam == VK_DOWN) {
+                const int itemCount = static_cast<int>(SendMessageW(state.listBox, LB_GETCOUNT, 0, 0));
+                if (itemCount > 0) {
+                    int listIndex = static_cast<int>(SendMessageW(state.listBox, LB_GETCURSEL, 0, 0));
+                    if (listIndex < 0) {
+                        listIndex = 0;
+                    } else if (message.wParam == VK_UP && listIndex > 0) {
+                        --listIndex;
+                    } else if (message.wParam == VK_DOWN && listIndex + 1 < itemCount) {
+                        ++listIndex;
+                    }
+                    SendMessageW(state.listBox, LB_SETCURSEL, listIndex, 0);
+                    updatePickerSelectionFromList(&state);
+                    updatePickerFileNameEdit(&state);
+                    RECT rect = previewRect();
+                    InvalidateRect(window, &rect, TRUE);
+                }
+                continue;
+            }
+            if (message.wParam == VK_RETURN) {
+                if (SendMessageW(state.listBox, LB_GETCURSEL, 0, 0) != LB_ERR) {
+                    acceptPickerSelection(window, &state);
+                }
+                continue;
+            }
+        }
+        if (!IsDialogMessageW(window, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    EnableWindow(owner_, TRUE);
+    SetForegroundWindow(owner_);
+    if (gdiplusStarted) {
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+    }
+    result.selectedIndex = state.selectedIndex;
+    result.selectedFileName = state.selectedFileName;
+    result.sendTextAsFile = state.sendTextAsFile;
+    return result;
+}
