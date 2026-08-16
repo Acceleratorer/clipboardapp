@@ -43,8 +43,14 @@ bool processCanPasteFiles(const std::wstring& processName) {
 }
 
 unsigned long long maxCacheFileBytes(const AppConfig& config) {
-    const int maxFileSizeMB = config.maxFileSizeMB < 1 ? 1 : config.maxFileSizeMB;
-    return static_cast<unsigned long long>(maxFileSizeMB) * 1024ULL * 1024ULL;
+    if (config.maxFileSizeMB <= 0) {
+        return ~0ULL;
+    }
+    return static_cast<unsigned long long>(config.maxFileSizeMB) * 1024ULL * 1024ULL;
+}
+
+int effectiveTextThreshold(const AppConfig& config) {
+    return config.textThreshold < 1 ? 1 : config.textThreshold;
 }
 
 bool byteSizeFitsCacheLimit(unsigned long long size, const AppConfig& config) {
@@ -199,7 +205,7 @@ bool ClipboardMonitor::shouldInterceptPasteShortcut(HWND targetWindow) {
     }
 
     const std::wstring text = readClipboardText();
-    if (text.empty() || static_cast<int>(text.size()) < config_.textThreshold) {
+    if (text.empty() || static_cast<int>(text.size()) < effectiveTextThreshold(config_)) {
         return false;
     }
 
@@ -219,7 +225,7 @@ bool ClipboardMonitor::prepareLongTextForPaste(HWND targetWindow, bool invokedBy
     }
 
     const std::wstring text = readClipboardText();
-    if (text.empty() || static_cast<int>(text.size()) < config_.textThreshold) {
+    if (text.empty() || static_cast<int>(text.size()) < effectiveTextThreshold(config_)) {
         return false;
     }
 

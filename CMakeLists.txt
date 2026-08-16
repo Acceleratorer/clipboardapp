@@ -17,7 +17,7 @@ add_executable(ClipboardTxtApp WIN32
 
 target_include_directories(ClipboardTxtApp PRIVATE src)
 target_compile_definitions(ClipboardTxtApp PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0501)
-target_link_libraries(ClipboardTxtApp PRIVATE shell32 user32 gdi32 ole32 uuid psapi gdiplus)
+target_link_libraries(ClipboardTxtApp PRIVATE shell32 user32 gdi32 ole32 uuid psapi gdiplus advapi32)
 
 if (MSVC)
     target_compile_options(ClipboardTxtApp PRIVATE /W4 /permissive-)

@@ -14,11 +14,12 @@ struct AppConfig {
     int cacheMaxAgeDays;
     bool askBeforeConverting;
     bool enableFileDialogAutoDetect;
+    bool startWithWindows;
     std::vector<std::wstring> allowedProcesses;
 
     AppConfig()
         : textThreshold(1800), maxItems(30), maxFileSizeMB(100), cacheMaxAgeDays(7),
-          askBeforeConverting(true), enableFileDialogAutoDetect(true) {}
+          askBeforeConverting(true), enableFileDialogAutoDetect(true), startWithWindows(false) {}
 };
 
 class AppState {
@@ -61,6 +62,7 @@ bool copyFileToPath(const std::wstring& source, const std::wstring& destination)
 bool deleteFileIfExists(const std::wstring& path);
 bool clearDirectoryContents(const std::wstring& directory);
 bool cleanOldCacheFiles(const std::wstring& directory, int maxAgeDays);
+bool setStartWithWindows(bool enabled);
 bool writeBinaryFile(const std::wstring& path, const void* data, size_t size);
 bool writeUtf8File(const std::wstring& path, const std::wstring& content, bool withBom);
 std::wstring readUtf8File(const std::wstring& path);

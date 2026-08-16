@@ -75,6 +75,15 @@ std::vector<std::wstring> splitLines(const std::wstring& value) {
     }
     return lines;
 }
+
+std::wstring currentExecutablePath() {
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, &buffer[0], static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size()) {
+        return L"";
+    }
+    return std::wstring(&buffer[0], length);
+}
 } // namespace
 
 bool AppState::initialize() {
@@ -89,6 +98,7 @@ bool AppState::initialize() {
 
     config_.allowedProcesses = defaultAllowedProcesses();
     load();
+    setStartWithWindows(config_.startWithWindows);
     if (config_.cacheMaxAgeDays > 0) {
         cleanOldCacheFiles(cacheDir_, config_.cacheMaxAgeDays);
     }
@@ -113,11 +123,11 @@ void AppState::load() {
         const std::wstring key = trim(line.substr(0, separator));
         const std::wstring value = trim(line.substr(separator + 1));
         if (key == L"textThreshold") {
-            config_.textThreshold = std::max(1, _wtoi(value.c_str()));
+            config_.textThreshold = std::max(0, _wtoi(value.c_str()));
         } else if (key == L"maxItems") {
             int parsed = _wtoi(value.c_str());
-            if (parsed < 1) {
-                parsed = 1;
+            if (parsed < 0) {
+                parsed = 0;
             }
             if (parsed > 500) {
                 parsed = 500;
@@ -125,8 +135,8 @@ void AppState::load() {
             config_.maxItems = parsed;
         } else if (key == L"maxFileSizeMB") {
             int parsed = _wtoi(value.c_str());
-            if (parsed < 1) {
-                parsed = 1;
+            if (parsed < 0) {
+                parsed = 0;
             }
             if (parsed > 10240) {
                 parsed = 10240;
@@ -145,6 +155,8 @@ void AppState::load() {
             config_.askBeforeConverting = parseBool(value, config_.askBeforeConverting);
         } else if (key == L"enableFileDialogAutoDetect") {
             config_.enableFileDialogAutoDetect = parseBool(value, config_.enableFileDialogAutoDetect);
+        } else if (key == L"startWithWindows") {
+            config_.startWithWindows = parseBool(value, config_.startWithWindows);
         } else if (key == L"allowedProcesses") {
             std::vector<std::wstring> processes = splitProcesses(value);
             if (!processes.empty()) {
@@ -162,6 +174,7 @@ void AppState::save() const {
     stream << L"cacheMaxAgeDays=" << config_.cacheMaxAgeDays << L"\n";
     stream << L"askBeforeConverting=" << (config_.askBeforeConverting ? L"true" : L"false") << L"\n";
     stream << L"enableFileDialogAutoDetect=" << (config_.enableFileDialogAutoDetect ? L"true" : L"false") << L"\n";
+    stream << L"startWithWindows=" << (config_.startWithWindows ? L"true" : L"false") << L"\n";
     stream << L"allowedProcesses=" << joinProcesses(config_.allowedProcesses) << L"\n";
     writeUtf8File(configPath_, stream.str(), true);
 }
@@ -406,6 +419,55 @@ bool cleanOldCacheFiles(const std::wstring& directory, int maxAgeDays) {
 
     FindClose(find);
     return true;
+}
+
+bool setStartWithWindows(bool enabled) {
+    const wchar_t* keyPath = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const wchar_t* valueName = L"ClipboardTxtApp";
+    HKEY key = nullptr;
+
+    if (!enabled) {
+        const LONG openResult = RegOpenKeyExW(HKEY_CURRENT_USER, keyPath, 0, KEY_SET_VALUE, &key);
+        if (openResult == ERROR_FILE_NOT_FOUND) {
+            return true;
+        }
+        if (openResult != ERROR_SUCCESS) {
+            return false;
+        }
+        const LONG deleteResult = RegDeleteValueW(key, valueName);
+        RegCloseKey(key);
+        return deleteResult == ERROR_SUCCESS || deleteResult == ERROR_FILE_NOT_FOUND;
+    }
+
+    const std::wstring executablePath = currentExecutablePath();
+    if (executablePath.empty()) {
+        return false;
+    }
+
+    const LONG createResult = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        keyPath,
+        0,
+        nullptr,
+        0,
+        KEY_SET_VALUE,
+        nullptr,
+        &key,
+        nullptr);
+    if (createResult != ERROR_SUCCESS) {
+        return false;
+    }
+
+    const std::wstring command = L"\"" + executablePath + L"\"";
+    const LONG setResult = RegSetValueExW(
+        key,
+        valueName,
+        0,
+        REG_SZ,
+        reinterpret_cast<const BYTE*>(command.c_str()),
+        static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return setResult == ERROR_SUCCESS;
 }
 
 bool writeBinaryFile(const std::wstring& path, const void* data, size_t size) {

@@ -269,7 +269,11 @@ ClipboardItem* ClipboardLibrary::itemAt(size_t index) {
 }
 
 void ClipboardLibrary::trimToLimit() {
-    size_t maxItems = static_cast<size_t>(config_.maxItems < 1 ? 1 : config_.maxItems);
+    if (config_.maxItems <= 0) {
+        return;
+    }
+
+    const size_t maxItems = static_cast<size_t>(config_.maxItems);
     while (items_.size() > maxItems) {
         removeOwnedCache(items_.back());
         items_.pop_back();
