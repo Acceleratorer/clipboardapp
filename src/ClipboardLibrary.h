@@ -20,8 +20,9 @@ struct ClipboardItem {
     std::wstring createdAt;
     std::wstring previewPath;
     bool cached;
+    bool pinned;
 
-    ClipboardItem() : type(Text), cached(false) {}
+    ClipboardItem() : type(Text), cached(false), pinned(false) {}
 };
 
 class ClipboardLibrary {
@@ -36,10 +37,13 @@ public:
 
     const std::vector<ClipboardItem>& items() const { return items_; }
     ClipboardItem* itemAt(size_t index);
+    int togglePinned(size_t index);
     void trimToLimit();
+    std::vector<std::wstring> pinnedCachePaths() const;
     void removeCachedItems();
 
 private:
+    size_t unpinnedInsertIndex() const;
     void removeOwnedCache(const ClipboardItem& item) const;
 
     std::wstring storagePath_;

@@ -18,9 +18,12 @@ struct TextConversionChoice {
 struct ClipboardPickResult {
     int selectedIndex;
     std::wstring selectedFileName;
+    std::wstring selectedText;
     bool sendTextAsFile;
+    bool multiText;
+    bool extractTextFromFile;
 
-    ClipboardPickResult() : selectedIndex(-1), sendTextAsFile(true) {}
+    ClipboardPickResult() : selectedIndex(-1), sendTextAsFile(true), multiText(false), extractTextFromFile(false) {}
 };
 
 class Ui {

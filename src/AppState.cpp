@@ -157,6 +157,14 @@ void AppState::load() {
             config_.enableFileDialogAutoDetect = parseBool(value, config_.enableFileDialogAutoDetect);
         } else if (key == L"startWithWindows") {
             config_.startWithWindows = parseBool(value, config_.startWithWindows);
+        } else if (key == L"multitextSeparatorMode") {
+            int parsed = _wtoi(value.c_str());
+            if (parsed < MultitextSeparatorSpace || parsed > MultitextSeparatorCustom) {
+                parsed = MultitextSeparatorNewline;
+            }
+            config_.multitextSeparatorMode = parsed;
+        } else if (key == L"multitextCustomSeparator") {
+            config_.multitextCustomSeparator = value;
         } else if (key == L"allowedProcesses") {
             std::vector<std::wstring> processes = splitProcesses(value);
             if (!processes.empty()) {
@@ -175,6 +183,8 @@ void AppState::save() const {
     stream << L"askBeforeConverting=" << (config_.askBeforeConverting ? L"true" : L"false") << L"\n";
     stream << L"enableFileDialogAutoDetect=" << (config_.enableFileDialogAutoDetect ? L"true" : L"false") << L"\n";
     stream << L"startWithWindows=" << (config_.startWithWindows ? L"true" : L"false") << L"\n";
+    stream << L"multitextSeparatorMode=" << config_.multitextSeparatorMode << L"\n";
+    stream << L"multitextCustomSeparator=" << config_.multitextCustomSeparator << L"\n";
     stream << L"allowedProcesses=" << joinProcesses(config_.allowedProcesses) << L"\n";
     writeUtf8File(configPath_, stream.str(), true);
 }
@@ -347,6 +357,10 @@ bool deleteFileIfExists(const std::wstring& path) {
 }
 
 bool clearDirectoryContents(const std::wstring& directory) {
+    return clearDirectoryContentsExcept(directory, std::vector<std::wstring>());
+}
+
+bool clearDirectoryContentsExcept(const std::wstring& directory, const std::vector<std::wstring>& preservedFiles) {
     if (!directoryExists(directory)) {
         return false;
     }
@@ -366,10 +380,19 @@ bool clearDirectoryContents(const std::wstring& directory) {
 
         const std::wstring path = pathJoin(directory, name);
         if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            clearDirectoryContents(path);
+            clearDirectoryContentsExcept(path, preservedFiles);
             RemoveDirectoryW(path.c_str());
         } else {
-            DeleteFileW(path.c_str());
+            bool preserved = false;
+            for (size_t index = 0; index < preservedFiles.size(); ++index) {
+                if (_wcsicmp(path.c_str(), preservedFiles[index].c_str()) == 0) {
+                    preserved = true;
+                    break;
+                }
+            }
+            if (!preserved) {
+                DeleteFileW(path.c_str());
+            }
         }
     } while (FindNextFileW(find, &data));
 

@@ -6,7 +6,9 @@ ClipboardTxtApp là ứng dụng quản lý clipboard nhỏ gọn dành cho Wind
 
 - Lưu lịch sử clipboard gồm text, file và hình ảnh.
 - Tìm kiếm nhanh trong nội dung, tiêu đề và đường dẫn file đã lưu.
-- Xem trước text, file và hình ảnh trước khi chọn.
+- Xem trước text, nội dung file TXT, file và hình ảnh trước khi chọn; hỗ trợ cuộn với nội dung dài.
+- Chọn nhiều mục text để ghép thành multitext với dấu phân cách có thể cấu hình.
+- Pin các mục quan trọng để giữ chúng ở đầu danh sách và tránh bị xóa khi dọn cache thủ công.
 - Mở thư viện clipboard bằng `Ctrl+Alt+V`.
 - Tự focus vào ô tìm kiếm khi cửa sổ clipboard xuất hiện.
 - Dùng `↑` và `↓` để di chuyển giữa các mục.
@@ -18,7 +20,7 @@ ClipboardTxtApp là ứng dụng quản lý clipboard nhỏ gọn dành cho Wind
 - Giới hạn số mục clipboard được lưu.
 - Giới hạn dung lượng tối đa của mỗi file hoặc hình ảnh cache.
 - Tự xóa cache cũ theo số ngày cấu hình; đặt `0` để không tự xóa.
-- Xóa toàn bộ file và hình ảnh cache thủ công từ cửa sổ Cài đặt.
+- Xóa file và hình ảnh cache chưa pin từ cửa sổ Cài đặt; mục đã pin và file của chúng được giữ lại.
 
 ## Cách sử dụng
 
@@ -37,6 +39,8 @@ Khi chọn một mục text bằng `Ctrl+Alt+V`, tùy chọn gửi dạng TXT m�
 | `Ctrl+Alt+V` | Mở thư viện clipboard và focus ô tìm kiếm |
 | `↑` / `↓` | Di chuyển mục đang chọn |
 | `Enter` | Chọn mục hiện tại |
+| `Ctrl+Enter` hoặc `Ctrl+click` | Chọn hoặc bỏ chọn một mục text trong multitext |
+| `Shift+Enter` hoặc `Shift+click` | Pin hoặc bỏ pin mục hiện tại |
 | `Esc` | Đóng cửa sổ clipboard |
 
 ## Cài đặt
@@ -49,6 +53,8 @@ Nhấn chuột trái hoặc chuột phải vào biểu tượng system tray, sau
 | Số slot clipboard | `30` | Số mục tối đa được giữ trong thư viện |
 | File cache tối đa | `100 MB` | Dung lượng tối đa cho mỗi file hoặc hình ảnh mới |
 | Số ngày giữ cache | `7` | File cũ hơn số ngày này bị xóa khi app khởi động; `0` là không tự xóa |
+| Dấu phân cách multitext | Một dòng trống | Chọn dấu cách, xuống dòng, một dòng trống hoặc chuỗi tùy chỉnh |
+| Khởi động cùng Windows | Tắt | Tự chạy ClipboardTxtApp khi đăng nhập Windows |
 | Luôn hỏi trước khi chuyển TXT | Bật | Hiện hộp xác nhận trước khi chuyển text dài thành file |
 | Tự phát hiện hộp Choose file | Bật | Tự hỗ trợ hộp thoại chọn file trong ứng dụng được phép |
 | Ứng dụng được phép | Danh sách trình duyệt và ứng dụng phổ biến | Mỗi process nhập trên một dòng |

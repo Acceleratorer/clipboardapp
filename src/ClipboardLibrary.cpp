@@ -182,10 +182,17 @@ void ClipboardLibrary::load() {
         if (fields.size() >= 7) {
             item.previewPath = decodeField(fields[6]);
         }
+        if (fields.size() >= 8) {
+            item.pinned = decodeField(fields[7]) == L"1" || decodeField(fields[7]) == L"true";
+        }
         if (item.type == ClipboardItem::Image && item.previewPath.empty() && !item.files.empty()) {
             item.previewPath = item.files.front();
         }
-        items_.push_back(item);
+        if (item.pinned) {
+            items_.insert(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(unpinnedInsertIndex()), item);
+        } else {
+            items_.push_back(item);
+        }
     }
     trimToLimit();
 }
@@ -205,6 +212,7 @@ void ClipboardLibrary::save() const {
         stream << L'\t' << joinFiles(item.originalFiles)
                << L'\t' << (item.cached ? L"1" : L"0")
                << L'\t' << encodeField(item.previewPath)
+               << L'\t' << (item.pinned ? L"1" : L"0")
                << L'\n';
     }
     writeUtf8File(storagePath_, stream.str(), true);
@@ -220,7 +228,7 @@ void ClipboardLibrary::addText(const std::wstring& text) {
     item.text = text;
     item.createdAt = nowString();
     item.title = L"Text (" + numberToWString(text.size()) + L" chars): " + previewText(text);
-    items_.insert(items_.begin(), item);
+    items_.insert(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(unpinnedInsertIndex()), item);
     trimToLimit();
     save();
 }
@@ -239,7 +247,7 @@ void ClipboardLibrary::addFiles(const std::vector<std::wstring>& cachedFiles, co
     item.title = cachedFiles.size() == 1
         ? L"File cache: " + fileNameFromPath(originalFiles.empty() ? cachedFiles.front() : originalFiles.front())
         : L"File cache: " + numberToWString(cachedFiles.size()) + L" items";
-    items_.insert(items_.begin(), item);
+    items_.insert(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(unpinnedInsertIndex()), item);
     trimToLimit();
     save();
 }
@@ -256,7 +264,7 @@ void ClipboardLibrary::addImage(const std::wstring& cachedImagePath, const std::
     item.cached = true;
     item.createdAt = nowString();
     item.title = title.empty() ? L"Image cache: " + fileNameFromPath(cachedImagePath) : title;
-    items_.insert(items_.begin(), item);
+    items_.insert(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(unpinnedInsertIndex()), item);
     trimToLimit();
     save();
 }
@@ -268,6 +276,29 @@ ClipboardItem* ClipboardLibrary::itemAt(size_t index) {
     return &items_[index];
 }
 
+int ClipboardLibrary::togglePinned(size_t index) {
+    if (index >= items_.size()) {
+        return -1;
+    }
+
+    ClipboardItem item = items_[index];
+    items_.erase(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(index));
+    item.pinned = !item.pinned;
+
+    const size_t newIndex = unpinnedInsertIndex();
+    items_.insert(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(newIndex), item);
+    save();
+    return static_cast<int>(newIndex);
+}
+
+size_t ClipboardLibrary::unpinnedInsertIndex() const {
+    size_t index = 0;
+    while (index < items_.size() && items_[index].pinned) {
+        ++index;
+    }
+    return index;
+}
+
 void ClipboardLibrary::trimToLimit() {
     if (config_.maxItems <= 0) {
         return;
@@ -275,16 +306,41 @@ void ClipboardLibrary::trimToLimit() {
 
     const size_t maxItems = static_cast<size_t>(config_.maxItems);
     while (items_.size() > maxItems) {
-        removeOwnedCache(items_.back());
-        items_.pop_back();
+        size_t removeIndex = items_.size();
+        while (removeIndex > 0 && items_[removeIndex - 1].pinned) {
+            --removeIndex;
+        }
+        if (removeIndex == 0) {
+            break;
+        }
+        --removeIndex;
+        removeOwnedCache(items_[removeIndex]);
+        items_.erase(items_.begin() + static_cast<std::vector<ClipboardItem>::difference_type>(removeIndex));
     }
+}
+
+std::vector<std::wstring> ClipboardLibrary::pinnedCachePaths() const {
+    std::vector<std::wstring> paths;
+    for (size_t itemIndex = 0; itemIndex < items_.size(); ++itemIndex) {
+        const ClipboardItem& item = items_[itemIndex];
+        if (!item.pinned || !item.cached) {
+            continue;
+        }
+        paths.insert(paths.end(), item.files.begin(), item.files.end());
+        if (!item.previewPath.empty()) {
+            paths.push_back(item.previewPath);
+        }
+    }
+    return paths;
 }
 
 void ClipboardLibrary::removeCachedItems() {
     std::vector<ClipboardItem> kept;
     for (size_t index = 0; index < items_.size(); ++index) {
-        if (items_[index].type == ClipboardItem::Text) {
+        if (items_[index].type == ClipboardItem::Text || items_[index].pinned) {
             kept.push_back(items_[index]);
+        } else {
+            removeOwnedCache(items_[index]);
         }
     }
     items_.swap(kept);

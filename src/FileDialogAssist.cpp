@@ -75,6 +75,51 @@ void sendEnter(HWND window) {
     SendInput(2, inputs, sizeof(INPUT));
 }
 
+std::wstring readTextFileForPaste(const std::wstring& path) {
+    FILE* file = _wfopen(path.c_str(), L"rb");
+    if (file == nullptr) {
+        return L"";
+    }
+    fseek(file, 0, SEEK_END);
+    const long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    if (size <= 0) {
+        fclose(file);
+        return L"";
+    }
+    std::string bytes(static_cast<size_t>(size), '\0');
+    fread(&bytes[0], 1, bytes.size(), file);
+    fclose(file);
+    if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF && static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        std::wstring result;
+        for (size_t index = 2; index + 1 < bytes.size(); index += 2) {
+            result += static_cast<wchar_t>(static_cast<unsigned char>(bytes[index]) | (static_cast<unsigned char>(bytes[index + 1]) << 8));
+        }
+        return result;
+    }
+    if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFE && static_cast<unsigned char>(bytes[1]) == 0xFF) {
+        std::wstring result;
+        for (size_t index = 2; index + 1 < bytes.size(); index += 2) {
+            result += static_cast<wchar_t>((static_cast<unsigned char>(bytes[index]) << 8) | static_cast<unsigned char>(bytes[index + 1]));
+        }
+        return result;
+    }
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF) {
+        bytes.erase(0, 3);
+    }
+    const std::wstring utf8 = utf8ToWide(bytes);
+    if (!utf8.empty() || bytes.empty()) {
+        return utf8;
+    }
+    const int wideSize = MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+    if (wideSize <= 0) {
+        return L"";
+    }
+    std::wstring ansi(static_cast<size_t>(wideSize), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), &ansi[0], wideSize);
+    return ansi;
+}
+
 } // namespace
 
 FileDialogAssist::FileDialogAssist(const AppConfig& config, const AllowedApps& allowedApps, ClipboardLibrary& library, TextFileConverter& converter, ClipboardMonitor& clipboard, Ui& ui)
@@ -114,6 +159,13 @@ void FileDialogAssist::assistActiveDialog(bool sendTextAsFileByDefault) {
     if (item == nullptr) {
         return;
     }
+    ClipboardItem multiTextItem;
+    if (pick.multiText) {
+        multiTextItem.type = ClipboardItem::Text;
+        multiTextItem.title = L"Multitext";
+        multiTextItem.text = pick.selectedText;
+        item = &multiTextItem;
+    }
 
     HWND dialog = IsWindow(originalDialog) ? originalDialog : findOpenDialog();
     if (dialog == nullptr) {
@@ -143,6 +195,14 @@ void FileDialogAssist::pasteIntoActiveInput(const ClipboardPickResult& pick, con
         target = GetForegroundWindow();
     }
     if (target == nullptr) {
+        return;
+    }
+
+    if (pick.extractTextFromFile && item.type == ClipboardItem::Files && item.files.size() == 1) {
+        const std::wstring text = readTextFileForPaste(item.files.front());
+        if (!text.empty() && clipboard_.putTextOnClipboard(text)) {
+            clipboard_.sendPasteToWindow(target);
+        }
         return;
     }
 
@@ -176,7 +236,7 @@ HWND FileDialogAssist::findOpenDialog() const {
             return dialog;
         }
     }
-    return dialogs.empty() ? nullptr : dialogs.front();
+    return nullptr;
 }
 
 bool FileDialogAssist::fillDialogWithPath(HWND dialog, const std::wstring& path) const {

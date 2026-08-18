@@ -7,6 +7,13 @@
 #include <string>
 #include <vector>
 
+enum MultitextSeparatorMode {
+    MultitextSeparatorSpace = 0,
+    MultitextSeparatorBlankLine = 1,
+    MultitextSeparatorNewline = 2,
+    MultitextSeparatorCustom = 3
+};
+
 struct AppConfig {
     int textThreshold;
     int maxItems;
@@ -15,11 +22,14 @@ struct AppConfig {
     bool askBeforeConverting;
     bool enableFileDialogAutoDetect;
     bool startWithWindows;
+    int multitextSeparatorMode;
+    std::wstring multitextCustomSeparator;
     std::vector<std::wstring> allowedProcesses;
 
     AppConfig()
         : textThreshold(1800), maxItems(30), maxFileSizeMB(100), cacheMaxAgeDays(7),
-          askBeforeConverting(true), enableFileDialogAutoDetect(true), startWithWindows(false) {}
+          askBeforeConverting(true), enableFileDialogAutoDetect(true), startWithWindows(false),
+          multitextSeparatorMode(MultitextSeparatorBlankLine), multitextCustomSeparator(L"\\n") {}
 };
 
 class AppState {
@@ -61,6 +71,7 @@ bool ensureDirectory(const std::wstring& path);
 bool copyFileToPath(const std::wstring& source, const std::wstring& destination);
 bool deleteFileIfExists(const std::wstring& path);
 bool clearDirectoryContents(const std::wstring& directory);
+bool clearDirectoryContentsExcept(const std::wstring& directory, const std::vector<std::wstring>& preservedFiles);
 bool cleanOldCacheFiles(const std::wstring& directory, int maxAgeDays);
 bool setStartWithWindows(bool enabled);
 bool writeBinaryFile(const std::wstring& path, const void* data, size_t size);

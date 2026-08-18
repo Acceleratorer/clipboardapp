@@ -69,6 +69,42 @@ bool fileFitsCacheLimit(const std::wstring& path, const AppConfig& config) {
     return byteSizeFitsCacheLimit(size.QuadPart, config);
 }
 
+void activatePasteTarget(HWND targetWindow) {
+    if (targetWindow == nullptr || !IsWindow(targetWindow)) {
+        return;
+    }
+
+    HWND rootWindow = GetAncestor(targetWindow, GA_ROOT);
+    if (rootWindow == nullptr) {
+        rootWindow = targetWindow;
+    }
+
+    const DWORD targetThread = GetWindowThreadProcessId(rootWindow, nullptr);
+    GUITHREADINFO threadInfo;
+    ZeroMemory(&threadInfo, sizeof(threadInfo));
+    threadInfo.cbSize = sizeof(threadInfo);
+    GetGUIThreadInfo(targetThread, &threadInfo);
+
+    const DWORD currentThread = GetCurrentThreadId();
+    const bool attached = targetThread != 0 && targetThread != currentThread &&
+        AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
+
+    if (IsIconic(rootWindow)) {
+        ShowWindow(rootWindow, SW_RESTORE);
+    }
+    BringWindowToTop(rootWindow);
+    SetForegroundWindow(rootWindow);
+
+    if (threadInfo.hwndFocus != nullptr && IsWindow(threadInfo.hwndFocus) &&
+        (threadInfo.hwndFocus == rootWindow || IsChild(rootWindow, threadInfo.hwndFocus))) {
+        SetFocus(threadInfo.hwndFocus);
+    }
+
+    if (attached) {
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    }
+}
+
 bool writeDibToBmpFile(const std::wstring& path, const void* dibData, size_t dibSize) {
     if (dibData == nullptr || dibSize < sizeof(BITMAPINFOHEADER)) {
         return false;
@@ -295,7 +331,7 @@ bool ClipboardMonitor::prepareLongTextForPaste(HWND targetWindow, bool invokedBy
 }
 
 void ClipboardMonitor::sendPasteToWindow(HWND targetWindow) {
-    SetForegroundWindow(targetWindow);
+    activatePasteTarget(targetWindow);
     INPUT inputs[4];
     ZeroMemory(inputs, sizeof(inputs));
     inputs[0].type = INPUT_KEYBOARD;
